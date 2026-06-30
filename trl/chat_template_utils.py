@@ -419,6 +419,8 @@ def add_response_schema(processing_class: ProcessingClassT) -> ProcessingClassT:
         tokenizer.response_schema = llama3_schema
     elif chat_template in [
         qwen2_5_chat_template,
+        qwen2_5_vl_chat_template,
+        qwen2_5_vl_training_chat_template,
         qwen3_chat_template,
         qwen3_instruct_2507_chat_template,
         qwen3_vl_chat_template,
