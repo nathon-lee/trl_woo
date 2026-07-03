@@ -89,6 +89,7 @@ class _ChunkedCELMHeadOutput(CausalLMOutputWithPast):
     entropy_sum: torch.Tensor | None = None
     num_valid_tokens: torch.Tensor | None = None
     aux_loss: torch.Tensor | None = None
+    router_logits: tuple[torch.Tensor, ...] | None = None
 
 
 def _maybe_gather_lm_head_ctx(w, b):
@@ -372,6 +373,7 @@ def _patch_chunked_ce_lm_head(model: torch.nn.Module, chunk_size: int, is_vlm: b
             entropy_sum=entropy_sum,
             num_valid_tokens=num_valid_tokens,
             aux_loss=aux_loss,
+            router_logits=outputs.router_logits if output_router_logits else None,
         )
 
     model.forward = types.MethodType(_chunked_ce_forward, model)
@@ -387,6 +389,22 @@ FLASH_ATTENTION_VARIANTS = {
     "kernels-community/flash-attn3",
     "kernels-community/vllm-flash-attn3",
 }
+
+
+def _get_expert_usage_mask(
+    router_logit: torch.Tensor,
+    labels: torch.Tensor | None,
+    shift_labels: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if shift_labels is not None and shift_labels.shape == router_logit.shape[:-1]:
+        return shift_labels != -100
+    if labels is not None:
+        if labels.shape == router_logit.shape[:-1]:
+            return labels != -100
+        if labels.ndim == router_logit.ndim - 1 and labels.shape[:-1] == router_logit.shape[:-2]:
+            if labels.shape[-1] == router_logit.shape[-2] + 1:
+                return labels[..., 1:] != -100
+    return None
 
 
 def get_dataset_column_names(dataset: Dataset | IterableDataset) -> list[str]:
@@ -1354,6 +1372,7 @@ class SFTTrainer(_BaseTrainer):
         text_config = model.config.get_text_config()
         is_moe = getattr(text_config, "output_router_logits", None) is not None
         self.aux_loss_enabled = is_moe and self.args.router_aux_loss_coef != 0.0
+        self.log_expert_usage = is_moe and self.args.log_expert_usage
         if is_moe:
             # The native and chunked forwards add the aux loss from the model config, so keep the config in sync with
             # the coef: enable it (and propagate the coef) when non-zero, disable it otherwise. This overrides any
@@ -1720,7 +1739,7 @@ class SFTTrainer(_BaseTrainer):
 
         # MoE models: request router logits so the model returns `outputs.aux_loss`. VLM wrappers honor this only
         # as a forward kwarg (not from the model config), so it must be passed here.
-        if self.aux_loss_enabled:
+        if self.aux_loss_enabled or (mode == "eval" and self.log_expert_usage):
             inputs["output_router_logits"] = True
 
         # Request token accuracy from Liger kernel and set token scaling if using DFT loss
@@ -1837,6 +1856,31 @@ class SFTTrainer(_BaseTrainer):
             aux_loss = outputs.aux_loss
             aux_loss = self.accelerator.gather_for_metrics(aux_loss).mean().item()
             self._metrics[mode]["aux_loss"].append(aux_loss)
+
+        if mode == "eval" and self.log_expert_usage and getattr(outputs, "router_logits", None) is not None:
+            shift_labels = inputs.get("shift_labels")
+            for layer_idx, router_logit in enumerate(outputs.router_logits):
+                mask = _get_expert_usage_mask(router_logit, labels, shift_labels)
+                if mask is None:
+                    continue
+
+                expert_indices = router_logit.argmax(dim=-1)
+                valid_expert_indices = expert_indices[mask]
+                num_experts = router_logit.shape[-1]
+                expert_counts = torch.bincount(valid_expert_indices.reshape(-1), minlength=num_experts).to(
+                    device=router_logit.device, dtype=torch.float32
+                )
+                total_count = mask.sum().to(device=router_logit.device, dtype=torch.float32)
+                stats = torch.cat((expert_counts, total_count.unsqueeze(0)))
+                stats = self.accelerator.reduce(stats, reduction="sum")
+                total_count = stats[-1]
+                if total_count <= 0:
+                    continue
+
+                expert_percentages = stats[:-1] / total_count
+                for expert_idx, expert_percentage in enumerate(expert_percentages):
+                    key = f"expert_usage/layer_{layer_idx}/expert_{expert_idx}"
+                    self._metrics[mode][key].append(expert_percentage.item())
 
         return (loss, outputs) if return_outputs else loss
 

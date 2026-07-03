@@ -47,6 +47,10 @@ class SFTConfig(_BaseConfig):
             Coefficient of the load-balancing auxiliary loss. Only has an effect when training a Mixture-of-Experts
             (MoE) model; for other models it does nothing. The auxiliary loss is added to the training loss with this
             weight. Set to `0.0` to disable it.
+        log_expert_usage (`bool`, *optional*, defaults to `False`):
+            Whether to log per-layer per-expert token usage statistics during evaluation for Mixture-of-Experts
+            models. When enabled, the trainer requests router logits only in eval mode and logs normalized expert
+            usage metrics derived from the routed tokens that contribute to the loss.
         chat_template_path (`str`, *optional*):
             If specified, sets the model's chat template. This can either be the path to a tokenizer (local directory
             or Hugging Face Hub model) or a direct path to a Jinja template file. When using a Jinja file, you must
@@ -159,6 +163,12 @@ class SFTConfig(_BaseConfig):
             "help": "Coefficient of the load-balancing auxiliary loss. Only has an effect when training a "
             "Mixture-of-Experts (MoE) model; for other models it does nothing. The auxiliary loss is added to the "
             "training loss with this weight. Set to `0.0` to disable it."
+        },
+    )
+    log_expert_usage: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to log per-layer per-expert token usage statistics during evaluation for Mixture-of-Experts models."
         },
     )
     trust_remote_code: bool = field(

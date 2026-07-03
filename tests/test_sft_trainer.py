@@ -1658,6 +1658,22 @@ class TestSFTTrainer(TrlTestCase):
         metrics = trainer.evaluate(eval_dataset=dataset["test"])
         assert metrics["eval_loss"] is not None
 
+    def test_evaluate_logs_expert_usage(self):
+        dataset = load_dataset("trl-internal-testing/zen", "standard_language_modeling")
+
+        training_args = SFTConfig(output_dir=self.tmp_dir, report_to="none", log_expert_usage=True)
+        trainer = SFTTrainer(
+            model="trl-internal-testing/tiny-Qwen3MoeForCausalLM",
+            args=training_args,
+            train_dataset=dataset["train"],
+        )
+
+        metrics = trainer.evaluate(eval_dataset=dataset["test"])
+
+        expert_usage_metrics = [key for key in metrics if key.startswith("eval_expert_usage/")]
+        assert expert_usage_metrics
+        assert all(metrics[key] >= 0.0 for key in expert_usage_metrics)
+
     def test_evaluate_with_raw_dataset_dict(self):
         # Same as above, but passing a dict of raw datasets to `evaluate`.
         dataset = load_dataset("trl-internal-testing/zen", "standard_prompt_completion")
