@@ -35,6 +35,12 @@ from trl.data_utils import prepare_multimodal_messages
 from .testing_utils import TrlTestCase, require_jmespath, require_vision
 
 
+QWEN_VL_TOOL_PATCH_MODELS = {
+    "trl-internal-testing/tiny-Qwen2VLForConditionalGeneration",
+    "trl-internal-testing/tiny-Qwen2_5_VLForConditionalGeneration",
+}
+
+
 class TestCloneChatTemplate(TrlTestCase):
     def test_clone(self):
         # This tokenizer doesn't have a chat_template by default
@@ -229,6 +235,32 @@ class TestAddResponseSchema:
         else:
             processor.tokenizer.parse_response(response)
 
+    @pytest.mark.parametrize(
+        "processor_name",
+        [
+            pytest.param("trl-internal-testing/tiny-Qwen2VLForConditionalGeneration", id="qwen2_vl"),
+            pytest.param("trl-internal-testing/tiny-Qwen2_5_VLForConditionalGeneration", id="qwen2.5_vl"),
+        ],
+    )
+    @require_vision
+    def test_add_response_schema_vlm_training_template(self, processor_name):
+        processor = AutoProcessor.from_pretrained(processor_name)
+        processor.chat_template = get_training_chat_template(processor)
+        processor = add_response_schema(processor)
+        assert processor.tokenizer.response_schema is not None
+        messages = [
+            {"role": "user", "content": [{"type": "text", "text": "What is 3*4?"}]},
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": ""}],
+                "tool_calls": [{"type": "function", "function": {"name": "multiply", "arguments": {"a": 3, "b": 4}}}],
+            },
+        ]
+        prefix = processor.apply_chat_template(messages[:1], tokenize=False, add_generation_prompt=True)
+        text = processor.apply_chat_template(messages, tokenize=False)
+        response = text[len(prefix) :]
+        processor.tokenizer.parse_response(response)
+
 
 class TestSupportsToolCalling:
     @pytest.mark.parametrize(
@@ -320,6 +352,19 @@ class TestSupportsToolCalling:
     def test_supports_tool_calling(self, model_id):
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         assert supports_tool_calling(tokenizer) is True
+
+    @pytest.mark.parametrize(
+        "processor_name",
+        [
+            pytest.param("trl-internal-testing/tiny-Qwen2VLForConditionalGeneration", id="qwen2_vl"),
+            pytest.param("trl-internal-testing/tiny-Qwen2_5_VLForConditionalGeneration", id="qwen2.5_vl"),
+        ],
+    )
+    @require_vision
+    def test_qwen_vl_training_template_supports_tool_calling(self, processor_name):
+        processor = AutoProcessor.from_pretrained(processor_name)
+        processor.chat_template = get_training_chat_template(processor)
+        assert supports_tool_calling(processor) is True
 
     @pytest.mark.parametrize(
         "model_id",
@@ -830,7 +875,11 @@ class TestGetTrainingChatTemplate:
         before = tokenizer.apply_chat_template(messages_before, tokenize=False)
         new_chat_template = get_training_chat_template(tokenizer)
         after = tokenizer.apply_chat_template(messages, tokenize=False, chat_template=new_chat_template)
-        if tokenizer_name == "trl-internal-testing/tiny-Glm4MoeForCausalLM":
+        if tokenizer_name in QWEN_VL_TOOL_PATCH_MODELS:
+            assert after != before
+            assert "<tool_call>" in after
+            assert '"name": "multiply"' in after
+        elif tokenizer_name == "trl-internal-testing/tiny-Glm4MoeForCausalLM":
             # GLM's native template doesn't terminate an assistant turn with an end-of-turn token; the turn is ended
             # by the following message's role marker. The training template appends that terminator to the final
             # assistant turn so the stop token is trained — here `<|observation|>`, which closes a tool call.
@@ -864,7 +913,12 @@ class TestGetTrainingChatTemplate:
         before = tokenizer.apply_chat_template(messages, tokenize=False, tools=tools)
         new_chat_template = get_training_chat_template(tokenizer)
         after = tokenizer.apply_chat_template(messages, tokenize=False, tools=tools, chat_template=new_chat_template)
-        assert before == after
+        if tokenizer_name in QWEN_VL_TOOL_PATCH_MODELS:
+            assert after != before
+            assert "<tools>" in after
+            assert '"name": "multiply"' in after
+        else:
+            assert before == after
 
     def test_behavior_unchanged_with_tools_with_system_message(self, tokenizer_name):
         tokenizer = self._load(tokenizer_name)
